@@ -176,15 +176,14 @@ class OCB_DB_Export {
         $header .= '-- Site URL: ' . get_option( 'siteurl' ) . "\n";
         $header .= '-- Table prefix: ' . $wpdb->prefix . "\n\n";
         $header .= "SET NAMES '{$charset}';\n";
+        $header .= "SET FOREIGN_KEY_CHECKS=0;\n";
         $header .= "SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n";
-        $header .= "SET AUTOCOMMIT=0;\n";
-        $header .= "START TRANSACTION;\n";
         $header .= "SET time_zone='+00:00';\n\n";
 
         file_put_contents( $output_file, $header );
     }
 
     public static function write_file_footer( string $output_file ): void {
-        file_put_contents( $output_file, "\nCOMMIT;\n", FILE_APPEND );
+        file_put_contents( $output_file, "\nSET FOREIGN_KEY_CHECKS=1;\n", FILE_APPEND );
     }
 }

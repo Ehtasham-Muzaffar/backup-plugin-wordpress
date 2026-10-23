@@ -73,9 +73,7 @@ class OCB_URL_Replacer {
             $unserialized = @unserialize( $value );
             if ( false !== $unserialized ) {
                 $replaced = $this->replace( $unserialized );
-                $result   = serialize( $replaced );
-                // Fix any string lengths that WordPress might have mangled.
-                return $this->fix_serialized_lengths( $result );
+                return serialize( $replaced );
             }
         }
 

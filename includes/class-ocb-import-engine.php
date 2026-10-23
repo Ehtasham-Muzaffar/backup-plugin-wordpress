@@ -30,38 +30,90 @@ class OCB_Import_Engine {
      * @return string Session ID.
      */
     public static function start( string $ocb_file ): string {
+        global $wpdb;
+
         $sid     = wp_generate_password( 16, false );
         $tmp_dir = OCB_File_Handler::get_temp_dir( 'import-' . $sid );
 
+        $target_site_url = rtrim( site_url(), '/' );
+        $target_home_url = rtrim( home_url(), '/' );
+
+        $current_user = wp_get_current_user();
+        $saved_user   = null;
+        if ( $current_user && $current_user->ID ) {
+            $user_row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->users} WHERE ID = %d", $current_user->ID ), ARRAY_A );
+            $usermeta = $wpdb->get_results( $wpdb->prepare( "SELECT meta_key, meta_value FROM {$wpdb->usermeta} WHERE user_id = %d", $current_user->ID ), ARRAY_A );
+            if ( $user_row ) {
+                $saved_user = [
+                    'row'  => $user_row,
+                    'meta' => $usermeta ?: [],
+                ];
+            }
+        }
+
+        $token = wp_generate_password( 32, false );
+
         $state = [
-            'session_id'    => $sid,
-            'ocb_file'      => $ocb_file,
-            'tmp_dir'       => $tmp_dir,
-            'phase'         => 'validate',
-            'manifest'      => null,
-            'sql_file'      => $tmp_dir . '/database.sql',
-            'snapshot_file' => $tmp_dir . '/snapshot.sql',
-            'extract_index' => 0,
-            'zip_entries'   => [],
-            'error'         => null,
+            'session_id'      => $sid,
+            'import_token'    => $token,
+            'ocb_file'        => $ocb_file,
+            'tmp_dir'         => $tmp_dir,
+            'phase'           => 'validate',
+            'manifest'        => null,
+            'target_site_url' => $target_site_url,
+            'target_home_url' => $target_home_url,
+            'saved_user'      => $saved_user,
+            'sql_file'        => $tmp_dir . '/database.sql',
+            'snapshot_file'   => $tmp_dir . '/snapshot.sql',
+            'extract_index'   => 0,
+            'zip_entries'     => [],
+            'error'           => null,
         ];
 
-        set_transient( self::state_key( $sid ), $state, HOUR_IN_SECONDS * 6 );
+        self::save_state( $sid, $state );
 
         return $sid;
     }
 
+    private static function state_file( string $sid ): string {
+        return OCB_File_Handler::get_temp_dir( 'import-' . $sid ) . DIRECTORY_SEPARATOR . 'state.json';
+    }
+
     public static function get_state( string $sid ): ?array {
-        $s = get_transient( self::state_key( $sid ) );
+        $file = self::state_file( $sid );
+        if ( file_exists( $file ) ) {
+            $data = json_decode( (string) file_get_contents( $file ), true );
+            if ( is_array( $data ) ) {
+                return $data;
+            }
+        }
+        $s = get_transient( 'ocb_import_state_' . $sid );
         return is_array( $s ) ? $s : null;
     }
 
     private static function save_state( string $sid, array $state ): void {
-        set_transient( self::state_key( $sid ), $state, HOUR_IN_SECONDS * 6 );
+        $file = self::state_file( $sid );
+        file_put_contents( $file, json_encode( $state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+        set_transient( 'ocb_import_state_' . $sid, $state, HOUR_IN_SECONDS * 6 );
     }
 
     public static function clear_state( string $sid ): void {
-        delete_transient( self::state_key( $sid ) );
+        $file = self::state_file( $sid );
+        if ( file_exists( $file ) ) {
+            @unlink( $file );
+        }
+        delete_transient( 'ocb_import_state_' . $sid );
+    }
+
+    public static function verify_import_token( string $sid, string $token ): bool {
+        if ( empty( $sid ) || empty( $token ) ) {
+            return false;
+        }
+        $state = self::get_state( $sid );
+        if ( empty( $state ) || empty( $state['import_token'] ) ) {
+            return false;
+        }
+        return hash_equals( (string) $state['import_token'], (string) $token );
     }
 
     // ── Process one chunk ─────────────────────────────────────────────────────
@@ -197,6 +249,13 @@ class OCB_Import_Engine {
 
         if ( $result['done'] ) {
             OCB_DB_Import::clear_state( $sid );
+
+            if ( ! empty( $state['saved_user'] ) ) {
+                self::restore_current_user( $state['saved_user'] );
+            }
+
+            self::ensure_plugin_active();
+
             $state['phase'] = 'extract_files';
             self::save_state( $sid, $state );
             return [ 'done' => false, 'progress' => 55, 'step' => __( 'Database import complete.', 'oneclick-backup' ), 'error' => null ];
@@ -309,15 +368,21 @@ class OCB_Import_Engine {
 
         $manifest = $state['manifest'];
         $old_url  = rtrim( $manifest['site_url'] ?? '', '/' );
-        $new_url  = rtrim( get_option( 'siteurl' ), '/' );
+        $new_url  = rtrim( $state['target_site_url'] ?? site_url(), '/' );
+        $new_home = rtrim( $state['target_home_url'] ?? home_url(), '/' );
 
-        if ( $old_url !== $new_url && ! empty( $old_url ) && ! empty( $new_url ) ) {
+        if ( ! empty( $old_url ) && ! empty( $new_url ) && $old_url !== $new_url ) {
             $replacer = new OCB_URL_Replacer( $old_url, $new_url );
             $tables   = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}%'" );
             foreach ( $tables as $table ) {
                 $replacer->replace_in_table( $table );
             }
         }
+
+        // Explicitly update siteurl and home in options table.
+        $options_tbl = $wpdb->prefix . 'options';
+        $wpdb->update( $options_tbl, [ 'option_value' => $new_url ], [ 'option_name' => 'siteurl' ] );
+        $wpdb->update( $options_tbl, [ 'option_value' => $new_home ?: $new_url ], [ 'option_name' => 'home' ] );
 
         // Also rename prefix-specific options/usermeta if prefix differs.
         $src_prefix = $manifest['table_prefix'] ?? $wpdb->prefix;
@@ -343,20 +408,17 @@ class OCB_Import_Engine {
         $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_%'" );
         $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_site_transient_%'" );
 
-        // Keep the current admin user logged in by regenerating their session.
+        // Keep current user logged in with a fresh auth cookie.
         $current_user = wp_get_current_user();
         if ( $current_user && $current_user->ID ) {
-            // The user's existing cookies/sessions remain; we just ensure they
-            // have an admin entry in the new DB.
-            wp_cache_flush();
+            wp_set_auth_cookie( $current_user->ID, true );
+            wp_set_current_user( $current_user->ID );
         }
+        wp_cache_flush();
 
         // Clean up temp dir.
-        OCB_File_Handler::remove_temp_dir( 'import-' . $sid );
         self::clear_state( $sid );
-
-        $state['phase'] = 'done';
-        self::save_state( $sid, $state );
+        OCB_File_Handler::remove_temp_dir( 'import-' . $sid );
 
         return [
             'done'     => true,
@@ -375,15 +437,98 @@ class OCB_Import_Engine {
         }
 
         OCB_DB_Import::restore_snapshot( $state['snapshot_file'] );
-        OCB_File_Handler::remove_temp_dir( 'import-' . $sid );
         self::clear_state( $sid );
+        OCB_File_Handler::remove_temp_dir( 'import-' . $sid );
 
         return true;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── User & Plugin preservation helpers ───────────────────────────────────
 
-    private static function err( string $msg ): array {
-        return [ 'done' => false, 'progress' => 0, 'step' => 'error', 'error' => $msg ];
+    private static function restore_current_user( array $saved_user ): void {
+        global $wpdb;
+
+        $row  = $saved_user['row'];
+        $meta = $saved_user['meta'];
+
+        $existing = $wpdb->get_row( $wpdb->prepare( "SELECT ID FROM {$wpdb->users} WHERE user_login = %s", $row['user_login'] ) );
+
+        if ( $existing ) {
+            $wpdb->update(
+                $wpdb->users,
+                [
+                    'user_pass'  => $row['user_pass'],
+                    'user_email' => $row['user_email'],
+                ],
+                [ 'ID' => $existing->ID ]
+            );
+            $user_id = (int) $existing->ID;
+        } else {
+            $id_taken = $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->users} WHERE ID = %d", $row['ID'] ) );
+            if ( ! $id_taken ) {
+                $wpdb->insert( $wpdb->users, $row );
+                $user_id = (int) ( $wpdb->insert_id ?: $row['ID'] );
+            } else {
+                $insert_row = $row;
+                unset( $insert_row['ID'] );
+                $wpdb->insert( $wpdb->users, $insert_row );
+                $user_id = (int) $wpdb->insert_id;
+            }
+        }
+
+        $cap_key = $wpdb->prefix . 'capabilities';
+        $lvl_key = $wpdb->prefix . 'user_level';
+
+        $caps_exist = $wpdb->get_var( $wpdb->prepare( "SELECT umeta_id FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s", $user_id, $cap_key ) );
+        if ( $caps_exist ) {
+            $wpdb->update( $wpdb->usermeta, [ 'meta_value' => serialize( [ 'administrator' => true ] ) ], [ 'user_id' => $user_id, 'meta_key' => $cap_key ] );
+        } else {
+            $wpdb->insert( $wpdb->usermeta, [ 'user_id' => $user_id, 'meta_key' => $cap_key, 'meta_value' => serialize( [ 'administrator' => true ] ) ] );
+        }
+
+        $lvl_exist = $wpdb->get_var( $wpdb->prepare( "SELECT umeta_id FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s", $user_id, $lvl_key ) );
+        if ( $lvl_exist ) {
+            $wpdb->update( $wpdb->usermeta, [ 'meta_value' => '10' ], [ 'user_id' => $user_id, 'meta_key' => $lvl_key ] );
+        } else {
+            $wpdb->insert( $wpdb->usermeta, [ 'user_id' => $user_id, 'meta_key' => $lvl_key, 'meta_value' => '10' ] );
+        }
+
+        foreach ( $meta as $m ) {
+            if ( $m['meta_key'] === 'session_tokens' ) {
+                $has_token = $wpdb->get_var( $wpdb->prepare( "SELECT umeta_id FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = 'session_tokens'", $user_id ) );
+                if ( $has_token ) {
+                    $wpdb->update( $wpdb->usermeta, [ 'meta_value' => $m['meta_value'] ], [ 'user_id' => $user_id, 'meta_key' => 'session_tokens' ] );
+                } else {
+                    $wpdb->insert( $wpdb->usermeta, [ 'user_id' => $user_id, 'meta_key' => 'session_tokens', 'meta_value' => $m['meta_value'] ] );
+                }
+            }
+        }
+
+        clean_user_cache( $user_id );
+        wp_set_current_user( $user_id );
+        wp_set_auth_cookie( $user_id, true );
+    }
+
+    private static function ensure_plugin_active(): void {
+        global $wpdb;
+        $plugin_file = plugin_basename( OCB_PLUGIN_FILE );
+        $options_tbl = $wpdb->prefix . 'options';
+
+        $active_val = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM `{$options_tbl}` WHERE option_name = 'active_plugins'" ) );
+        $active_plugins = maybe_unserialize( $active_val );
+
+        if ( ! is_array( $active_plugins ) ) {
+            $active_plugins = [];
+        }
+
+        if ( ! in_array( $plugin_file, $active_plugins, true ) ) {
+            $active_plugins[] = $plugin_file;
+            sort( $active_plugins );
+            $wpdb->update(
+                $options_tbl,
+                [ 'option_value' => serialize( $active_plugins ) ],
+                [ 'option_name'  => 'active_plugins' ]
+            );
+        }
     }
 }

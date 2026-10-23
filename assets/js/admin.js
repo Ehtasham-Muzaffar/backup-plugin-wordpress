@@ -25,10 +25,12 @@
             sessionId:    null,
             file:         null,
             importSid:    null,
+            importToken:  null,
         },
         restore: {
-            sessionId: null,
-            running:   false,
+            sessionId:   null,
+            importToken: null,
+            running:     false,
         },
     };
 
@@ -55,7 +57,16 @@
           .slideDown(200);
     }
 
-    function hideAlert(id) { $('#' + id).slideUp(100).html(''); }
+    function hideAlert(id) {
+        const el = $('#' + id);
+        el.slideUp(100);
+        if (id === 'ocb-import-error') {
+            $('#ocb-import-error-msg').text('');
+            $('#ocb-btn-rollback').hide();
+        } else {
+            el.html('');
+        }
+    }
 
     function formatBytes(bytes) {
         if (bytes < 1024)       return bytes + ' B';
@@ -73,7 +84,8 @@
         $('#ocb-modal-body').text(body);
         if (confirmLabel) $('#ocb-modal-confirm').text(confirmLabel);
         $('#ocb-modal').fadeIn(200);
-        $('#ocb-modal-confirm').focus();
+        const confirmBtn = document.getElementById('ocb-modal-confirm');
+        if (confirmBtn) confirmBtn.focus();
     }
 
     function closeModal() {
@@ -82,8 +94,9 @@
     }
 
     $(document).on('click', '#ocb-modal-confirm', function () {
+        const cb = modalCallback;
         closeModal();
-        if (typeof modalCallback === 'function') modalCallback();
+        if (typeof cb === 'function') cb();
     });
 
     $(document).on('click', '#ocb-modal-cancel, #ocb-modal-close', closeModal);
@@ -218,7 +231,8 @@
                 if (!res.success) {
                     return restoreError(res.data?.message || 'Restore start failed.', null);
                 }
-                state.restore.sessionId = res.data.session_id;
+                state.restore.sessionId   = res.data.session_id;
+                state.restore.importToken = res.data.import_token || '';
                 runImportChunk('restore');
             })
             .fail(function () { restoreError('AJAX request failed.', null); });
@@ -226,12 +240,17 @@
 
     function runImportChunk(context) {
         // context is 'restore' (list tab) or 'import' (import tab).
-        const sid = context === 'restore' ? state.restore.sessionId : state.upload.importSid;
+        const sid   = context === 'restore' ? state.restore.sessionId   : state.upload.importSid;
+        const token = context === 'restore' ? state.restore.importToken : state.upload.importToken;
         const barId   = context === 'restore' ? 'ocb-restore-bar'   : 'ocb-import-bar';
         const labelId = context === 'restore' ? 'ocb-restore-label' : 'ocb-import-label';
         const errFn   = context === 'restore' ? restoreError        : importError;
 
-        ajax('ocb_import_chunk', { session_id: sid }, 'import_chunk')
+        if (!sid) {
+            return errFn('Missing session ID.', null);
+        }
+
+        ajax('ocb_import_chunk', { session_id: sid, import_token: token }, 'import_chunk')
             .done(function (res) {
                 if (!res.success) {
                     const d = res.data || {};
@@ -250,7 +269,10 @@
                     setTimeout(function () { runImportChunk(context); }, 0);
                 }
             })
-            .fail(function () { errFn('AJAX request failed.', sid); });
+            .fail(function (xhr, status, error) {
+                const msg = xhr.responseJSON?.data?.message || xhr.responseJSON?.data?.error || error || 'AJAX request failed.';
+                errFn(msg, sid);
+            });
     }
 
     function restoreDone() {
@@ -277,40 +299,54 @@
     // ── IMPORT TAB — Drag & Drop + Chunked Upload                       ──
     // ── ================================================================ ──
 
-    const $dropzone = $('#ocb-dropzone');
-    const $fileInput = $('#ocb-file-input');
+    function openFilePicker() {
+        const input = document.getElementById('ocb-file-input');
+        if (input) {
+            input.value = '';
+            input.click();
+        }
+    }
 
     // Browse button.
     $(document).on('click', '#ocb-browse-btn', function (e) {
+        e.preventDefault();
         e.stopPropagation();
-        $fileInput.trigger('click');
+        openFilePicker();
     });
 
     // Click dropzone.
-    $(document).on('click', '#ocb-dropzone', function () {
-        $fileInput.trigger('click');
+    $(document).on('click', '#ocb-dropzone', function (e) {
+        if ($(e.target).closest('#ocb-browse-btn').length) {
+            return;
+        }
+        openFilePicker();
     });
 
-    $fileInput.on('change', function () {
-        if (this.files.length) setSelectedFile(this.files[0]);
+    // File input change.
+    $(document).on('change', '#ocb-file-input', function () {
+        if (this.files && this.files.length) {
+            setSelectedFile(this.files[0]);
+        }
     });
 
     // Drag events.
-    $dropzone
-        .on('dragover dragenter', function (e) {
+    $(document)
+        .on('dragover dragenter', '#ocb-dropzone', function (e) {
             e.preventDefault();
             e.stopPropagation();
-            $dropzone.addClass('ocb-dropzone-hover');
+            $('#ocb-dropzone').addClass('ocb-dropzone-hover');
         })
-        .on('dragleave dragend drop', function (e) {
+        .on('dragleave dragend drop', '#ocb-dropzone', function (e) {
             e.preventDefault();
             e.stopPropagation();
-            $dropzone.removeClass('ocb-dropzone-hover');
+            $('#ocb-dropzone').removeClass('ocb-dropzone-hover');
         })
-        .on('drop', function (e) {
+        .on('drop', '#ocb-dropzone', function (e) {
             const dt    = e.originalEvent.dataTransfer;
             const files = dt && dt.files;
-            if (files && files.length) setSelectedFile(files[0]);
+            if (files && files.length) {
+                setSelectedFile(files[0]);
+            }
         });
 
     function setSelectedFile(file) {
@@ -408,7 +444,8 @@
                 if (!res.success) {
                     return uploadError(res.data?.message || 'Import start failed.');
                 }
-                state.upload.importSid = res.data.session_id;
+                state.upload.importSid   = res.data.session_id;
+                state.upload.importToken = res.data.import_token || '';
                 showManifestPreview(res.data.manifest);
             })
             .fail(function () { uploadError('AJAX error after upload.'); });
@@ -461,6 +498,9 @@
 
     function importError(msg, sid) {
         const $errDiv = $('#ocb-import-error');
+        if (!$('#ocb-import-error-msg').length) {
+            $errDiv.prepend('<p id="ocb-import-error-msg"></p>');
+        }
         $('#ocb-import-error-msg').text(OCB.i18n.error_prefix + msg);
         $errDiv.slideDown(200);
 
@@ -471,12 +511,18 @@
     }
 
     $(document).on('click', '#ocb-btn-rollback', function () {
-        const sid = $(this).data('sid');
+        const sid   = $(this).data('sid');
+        const token = state.upload.importToken || state.restore.importToken || '';
         $(this).prop('disabled', true).text('Rolling back…');
 
-        ajax('ocb_import_rollback', { session_id: sid }, 'import_rollback')
+        ajax('ocb_import_rollback', { session_id: sid, import_token: token }, 'import_rollback')
             .done(function (res) {
                 const msg = res.success ? res.data.message : (res.data?.message || 'Rollback failed.');
+                alert(msg);
+                $('#ocb-btn-rollback').prop('disabled', false).text('Roll Back to Previous Database');
+            })
+            .fail(function (xhr, status, error) {
+                const msg = xhr.responseJSON?.data?.message || error || 'Rollback request failed.';
                 alert(msg);
                 $('#ocb-btn-rollback').prop('disabled', false).text('Roll Back to Previous Database');
             });

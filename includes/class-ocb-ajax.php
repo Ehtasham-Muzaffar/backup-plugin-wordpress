@@ -27,6 +27,10 @@ class OCB_Ajax {
             add_action( 'wp_ajax_' . $action, [ __CLASS__, 'handle_' . $action ] );
         }
 
+        // Allow continuing chunks & rollback even if database tables (users/options) are swapped during import.
+        add_action( 'wp_ajax_nopriv_ocb_import_chunk', [ __CLASS__, 'handle_ocb_import_chunk' ] );
+        add_action( 'wp_ajax_nopriv_ocb_import_rollback', [ __CLASS__, 'handle_ocb_import_rollback' ] );
+
         // Authenticated download (non-AJAX, tab request).
         add_action( 'admin_init', [ __CLASS__, 'maybe_handle_download' ] );
     }
@@ -162,22 +166,34 @@ class OCB_Ajax {
             wp_send_json_error( [ 'message' => __( 'Invalid .ocb file: no manifest found.', 'oneclick-backup' ) ] );
         }
 
-        $sid = OCB_Import_Engine::start( $assembled );
+        $sid   = OCB_Import_Engine::start( $assembled );
+        $state = OCB_Import_Engine::get_state( $sid );
 
         wp_send_json_success( [
-            'session_id' => $sid,
-            'manifest'   => $manifest,
+            'session_id'   => $sid,
+            'import_token' => $state['import_token'] ?? '',
+            'manifest'     => $manifest,
         ] );
     }
 
     // ── Import: chunk ─────────────────────────────────────────────────────────
 
     public static function handle_ocb_import_chunk(): void {
-        OCB_Security::check_ajax_nonce( 'import_chunk' );
-
-        $sid = sanitize_text_field( $_POST['session_id'] ?? '' );
+        $sid   = sanitize_text_field( $_POST['session_id'] ?? '' );
+        $token = sanitize_text_field( $_POST['import_token'] ?? '' );
         if ( ! $sid ) {
             wp_send_json_error( [ 'message' => 'Missing session_id.' ] );
+        }
+
+        $authorized = false;
+        if ( ! empty( $token ) && OCB_Import_Engine::verify_import_token( $sid, $token ) ) {
+            $authorized = true;
+        } elseif ( is_user_logged_in() && current_user_can( OCB_Security::CAP ) && OCB_Security::verify_nonce( $_REQUEST['_nonce'] ?? '', 'import_chunk' ) ) {
+            $authorized = true;
+        }
+
+        if ( ! $authorized ) {
+            wp_send_json_error( [ 'message' => __( 'Security check failed.', 'oneclick-backup' ) ], 403 );
         }
 
         $result = OCB_Import_Engine::process_chunk( $sid );
@@ -191,10 +207,24 @@ class OCB_Ajax {
     // ── Import: rollback ──────────────────────────────────────────────────────
 
     public static function handle_ocb_import_rollback(): void {
-        OCB_Security::check_ajax_nonce( 'import_rollback' );
+        $sid   = sanitize_text_field( $_POST['session_id'] ?? '' );
+        $token = sanitize_text_field( $_POST['import_token'] ?? '' );
+        if ( ! $sid ) {
+            wp_send_json_error( [ 'message' => 'Missing session_id.' ] );
+        }
 
-        $sid = sanitize_text_field( $_POST['session_id'] ?? '' );
-        $ok  = OCB_Import_Engine::rollback( $sid );
+        $authorized = false;
+        if ( ! empty( $token ) && OCB_Import_Engine::verify_import_token( $sid, $token ) ) {
+            $authorized = true;
+        } elseif ( is_user_logged_in() && current_user_can( OCB_Security::CAP ) && OCB_Security::verify_nonce( $_REQUEST['_nonce'] ?? '', 'import_rollback' ) ) {
+            $authorized = true;
+        }
+
+        if ( ! $authorized ) {
+            wp_send_json_error( [ 'message' => __( 'Security check failed.', 'oneclick-backup' ) ], 403 );
+        }
+
+        $ok = OCB_Import_Engine::rollback( $sid );
 
         if ( $ok ) {
             wp_send_json_success( [ 'message' => __( 'Rollback successful. Previous database restored.', 'oneclick-backup' ) ] );
@@ -222,10 +252,12 @@ class OCB_Ajax {
 
         $manifest = OCB_File_Handler::read_manifest_from_ocb( $path );
         $sid      = OCB_Import_Engine::start( $path );
+        $state    = OCB_Import_Engine::get_state( $sid );
 
         wp_send_json_success( [
-            'session_id' => $sid,
-            'manifest'   => $manifest,
+            'session_id'   => $sid,
+            'import_token' => $state['import_token'] ?? '',
+            'manifest'     => $manifest,
         ] );
     }
 

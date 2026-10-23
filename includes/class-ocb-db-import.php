@@ -12,30 +12,43 @@ class OCB_DB_Import {
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    private static function state_key( string $session_id ): string {
-        return 'ocb_db_import_state_' . $session_id;
+    private static function state_file( string $session_id ): string {
+        return OCB_File_Handler::get_temp_dir( 'import-' . $session_id ) . DIRECTORY_SEPARATOR . 'db_state.json';
     }
 
     public static function init_state( string $session_id, string $sql_file ): void {
         $state = [
-            'sql_file'   => $sql_file,
+            'sql_file'    => $sql_file,
             'byte_offset' => 0,
             'done'        => false,
         ];
-        set_transient( self::state_key( $session_id ), $state, HOUR_IN_SECONDS * 3 );
+        self::save_state( $session_id, $state );
     }
 
     public static function get_state( string $session_id ): ?array {
-        $s = get_transient( self::state_key( $session_id ) );
+        $file = self::state_file( $session_id );
+        if ( file_exists( $file ) ) {
+            $data = json_decode( (string) file_get_contents( $file ), true );
+            if ( is_array( $data ) ) {
+                return $data;
+            }
+        }
+        $s = get_transient( 'ocb_db_import_state_' . $session_id );
         return is_array( $s ) ? $s : null;
     }
 
     public static function save_state( string $session_id, array $state ): void {
-        set_transient( self::state_key( $session_id ), $state, HOUR_IN_SECONDS * 3 );
+        $file = self::state_file( $session_id );
+        file_put_contents( $file, json_encode( $state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+        set_transient( 'ocb_db_import_state_' . $session_id, $state, HOUR_IN_SECONDS * 3 );
     }
 
     public static function clear_state( string $session_id ): void {
-        delete_transient( self::state_key( $session_id ) );
+        $file = self::state_file( $session_id );
+        if ( file_exists( $file ) ) {
+            @unlink( $file );
+        }
+        delete_transient( 'ocb_db_import_state_' . $session_id );
     }
 
     // ── Import a chunk ────────────────────────────────────────────────────────
@@ -70,6 +83,9 @@ class OCB_DB_Import {
 
         fseek( $fh, $byte_offset );
 
+        $wpdb->query( "SET FOREIGN_KEY_CHECKS=0" );
+        $wpdb->query( "SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO'" );
+
         $statements_run = 0;
         $buffer         = '';
 
@@ -83,6 +99,11 @@ class OCB_DB_Import {
             // Skip comments and empty lines.
             $trimmed = ltrim( $line );
             if ( '' === $trimmed || '--' === substr( $trimmed, 0, 2 ) || '#' === $trimmed[0] ) {
+                continue;
+            }
+
+            $upper = strtoupper( trim( $trimmed ) );
+            if ( 'START TRANSACTION;' === $upper || 'COMMIT;' === $upper || strpos( $upper, 'SET AUTOCOMMIT' ) === 0 ) {
                 continue;
             }
 

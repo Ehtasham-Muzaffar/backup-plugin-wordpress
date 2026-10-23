@@ -65,17 +65,26 @@ class OCB_Security {
         $real_path = realpath( $path );
 
         if ( false === $real_base ) {
-            throw new RuntimeException( "Base directory does not exist: {$base}" );
+            $real_base = self::normalize_path( $base );
         }
         if ( false === $real_path ) {
             // Path doesn't exist yet; normalise manually.
             $real_path = self::normalize_path( $path );
         }
-        if ( strpos( $real_path, $real_base ) !== 0 ) {
+
+        $norm_base = rtrim( wp_normalize_path( $real_base ), '/' ) . '/';
+        $norm_path = wp_normalize_path( $real_path );
+
+        $is_windows = ( DIRECTORY_SEPARATOR === '\\' );
+        $match = $is_windows
+            ? ( stripos( $norm_path, $norm_base ) === 0 || stripos( $norm_path . '/', $norm_base ) === 0 )
+            : ( strpos( $norm_path, $norm_base ) === 0 || strpos( $norm_path . '/', $norm_base ) === 0 );
+
+        if ( ! $match ) {
             throw new RuntimeException( "Path traversal detected: {$path}" );
         }
 
-        return $real_path;
+        return $norm_path;
     }
 
     private static function normalize_path( string $path ): string {

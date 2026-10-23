@@ -204,7 +204,7 @@ XML;
     // ── Temp directory ────────────────────────────────────────────────────────
 
     public static function get_temp_dir( string $session_id ): string {
-        $dir = self::get_backup_dir() . DIRECTORY_SEPARATOR . 'tmp-' . preg_replace( '/[^a-z0-9]/', '', $session_id );
+        $dir = self::get_backup_dir() . DIRECTORY_SEPARATOR . 'tmp-' . preg_replace( '/[^a-zA-Z0-9_-]/', '', $session_id );
         if ( ! is_dir( $dir ) ) {
             wp_mkdir_p( $dir );
         }
@@ -212,7 +212,7 @@ XML;
     }
 
     public static function remove_temp_dir( string $session_id ): void {
-        $dir = self::get_backup_dir() . DIRECTORY_SEPARATOR . 'tmp-' . preg_replace( '/[^a-z0-9]/', '', $session_id );
+        $dir = self::get_backup_dir() . DIRECTORY_SEPARATOR . 'tmp-' . preg_replace( '/[^a-zA-Z0-9_-]/', '', $session_id );
         self::rmdir_recursive( $dir );
     }
 

@@ -250,11 +250,11 @@ class OCB_Admin {
             <h2><?php esc_html_e( 'Import / Restore from File', 'oneclick-backup' ); ?></h2>
             <p class="ocb-desc"><?php esc_html_e( 'Upload a .ocb backup file (even from a different site) and restore it here. Large files are uploaded in chunks automatically.', 'oneclick-backup' ); ?></p>
 
+            <input type="file" id="ocb-file-input" accept=".ocb" style="display:none">
             <div class="ocb-dropzone" id="ocb-dropzone">
                 <span class="dashicons dashicons-upload ocb-dropzone-icon"></span>
                 <p class="ocb-dropzone-text"><?php esc_html_e( 'Drag & drop your .ocb file here, or click to browse', 'oneclick-backup' ); ?></p>
-                <input type="file" id="ocb-file-input" accept=".ocb" style="display:none">
-                <button class="ocb-btn ocb-btn-secondary" id="ocb-browse-btn"><?php esc_html_e( 'Browse File', 'oneclick-backup' ); ?></button>
+                <button type="button" class="ocb-btn ocb-btn-secondary" id="ocb-browse-btn"><?php esc_html_e( 'Browse File', 'oneclick-backup' ); ?></button>
             </div>
 
             <div id="ocb-file-info" style="display:none">
